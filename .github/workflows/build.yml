@@ -30,7 +30,7 @@ jobs:
 
       - name: List regions
         run: |
-          curl -4 -sSfL --retry 5 --retry-delay 15 --retry-all-errors https://download.geofabrik.de/index-v1.json -o index-v1.json
+          curl -sSfL --connect-timeout 30 --retry 8 --retry-delay 30 --retry-all-errors https://download.geofabrik.de/index-v1.json -o index-v1.json || curl -4 -sSfL --connect-timeout 30 --retry 8 --retry-delay 30 --retry-all-errors https://download.geofabrik.de/index-v1.json -o index-v1.json
           python scripts/regions.py regions.json > regions.txt
           wc -l regions.txt
 
@@ -39,7 +39,7 @@ jobs:
           set -euo pipefail
           while read -r id url; do
             echo "::group::$id"
-            curl -4 -sSfL --retry 5 --retry-delay 20 --retry-all-errors "$url" -o region.osm.pbf
+            curl -sSfL --connect-timeout 30 --retry 8 --retry-delay 30 --retry-all-errors "$url" -o region.osm.pbf || curl -4 -sSfL --connect-timeout 30 --retry 8 --retry-delay 30 --retry-all-errors "$url" -o region.osm.pbf
             python scripts/build_tiles.py add region.osm.pbf work
             rm -f region.osm.pbf
             echo "::endgroup::"
