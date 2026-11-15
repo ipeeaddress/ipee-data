@@ -32,29 +32,49 @@ def bbox(geom):
     walk(geom['coordinates'])
     return [round(min(xs), 3), round(min(ys), 3), round(max(xs), 3), round(max(ys), 3)]
 
-picked, boxes = [], []
+by_id = {f['properties']['id']: f for f in feats}
+children = {}
+for f in feats:
+    children.setdefault(f['properties'].get('parent'), []).append(f['properties']['id'])
+
+def leaves(fid):
+    """A region that is split further (California -> norcal/socal) is replaced by its pieces."""
+    kids = [k for k in children.get(fid, []) if 'pbf' in by_id[k]['properties'].get('urls', {})]
+    if not kids:
+        return [fid]
+    out = []
+    for k in kids:
+        out += leaves(k)
+    return out
+
+wanted_ids = []
 for f in feats:
     p = f['properties']
     if 'pbf' not in p.get('urls', {}):
         continue
-    hit = p.get('parent') in PARENTS or any(c.startswith(ISO_PREFIXES) for c in iso2(p))
-    if not hit:
-        continue
-    if p['id'] in parents_with_children:
-        continue  # split further (e.g. California -> norcal/socal): take the children
-    picked.append(p)
-    print(p['id'], p['urls']['pbf'])
-    boxes.append(bbox(f['geometry']))
+    if p.get('parent') in PARENTS or any(c.startswith(ISO_PREFIXES) for c in iso2(p)):
+        wanted_ids.append(p['id'])
+
+picked, boxes, seen = [], [], set()
+for fid in wanted_ids:
+    for leaf in leaves(fid):
+        if leaf in seen:
+            continue
+        seen.add(leaf)
+        p = by_id[leaf]['properties']
+        picked.append(p)
+        print(p['id'], p['urls']['pbf'])
+        boxes.append(bbox(by_id[leaf]['geometry']))
 
 # Diagnostics
 print(f'picked {len(picked)} regions', file=sys.stderr)
 print('parents:', Counter(p.get('parent') for p in picked), file=sys.stderr)
-us_like = [f['properties']['id'] for f in feats if 'alabama' in f['properties']['id'] or 'columbia' in f['properties']['id'] or f['properties']['id'] in ('us', 'canada')]
+us_like = [f['properties']['id'] for f in feats if any(w in f['properties']['id'] for w in ('california', 'columbia', 'nunavut', 'norcal', 'socal'))]
 for fid in us_like:
     pp = next(f['properties'] for f in feats if f['properties']['id'] == fid)
     print('  sample:', fid, 'parent=', pp.get('parent'), 'iso2=', pp.get('iso3166-2'), file=sys.stderr)
-if len(picked) < 50:
-    sys.exit(f'Only {len(picked)} regions found - expected 60+ (50 US states + DC + territories + 13 Canadian). Stopping.')
+if len(picked) < 60 or not any('cal' in p['id'] for p in picked):
+    sys.exit(f'Region list looks wrong ({len(picked)} regions, California present: {any("cal" in p["id"] for p in picked)}). Stopping.')
 
 with open(sys.argv[1] if len(sys.argv) > 1 else 'regions.json', 'w') as out:
     json.dump(boxes, out)
