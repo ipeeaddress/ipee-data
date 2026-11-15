@@ -4,3 +4,4 @@ site/
 regions.json
 regions.txt
 __pycache__/
+index-v1.json

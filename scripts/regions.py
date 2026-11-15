@@ -3,12 +3,13 @@
 
 Prints one line per region: <id> <pbf_url>  and writes regions.json with their bounding boxes.
 """
-import json, sys, urllib.request
+import json, sys
 
 PARENTS = {'us', 'canada'}  # add e.g. 'europe' countries here later
 
-with urllib.request.urlopen('https://download.geofabrik.de/index-v1.json') as r:
-    index = json.load(r)
+# index-v1.json is downloaded by the workflow (curl, with retries) before this runs.
+with open('index-v1.json') as f:
+    index = json.load(f)
 
 def bbox(geom):
     xs, ys = [], []
