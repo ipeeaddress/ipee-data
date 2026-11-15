@@ -1,0 +1,63 @@
+name: Build restroom map data
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'   # every Monday, 6:17 UTC
+  workflow_dispatch:        # "Run workflow" button for a manual rebuild
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install osmium
+        run: pip install osmium
+
+      - name: List regions
+        run: python scripts/regions.py regions.json > regions.txt && wc -l regions.txt
+
+      - name: Download and process each region
+        run: |
+          set -euo pipefail
+          while read -r id url; do
+            echo "::group::$id"
+            curl -sSfL --retry 3 --retry-delay 20 "$url" -o region.osm.pbf
+            python scripts/build_tiles.py add region.osm.pbf work
+            rm -f region.osm.pbf
+            echo "::endgroup::"
+          done < regions.txt
+
+      - name: Write tiles
+        run: |
+          python scripts/build_tiles.py finish work site regions.json
+          cp README.md site/ 2>/dev/null || true
+          du -sh site
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

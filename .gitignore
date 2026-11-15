@@ -1,0 +1,6 @@
+work/
+site/
+*.osm.pbf
+regions.json
+regions.txt
+__pycache__/
