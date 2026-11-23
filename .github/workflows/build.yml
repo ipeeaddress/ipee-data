@@ -19,9 +19,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 340
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -30,20 +30,32 @@ jobs:
 
       - name: List regions
         run: |
-          curl -sSfL --connect-timeout 30 --retry 8 --retry-delay 30 --retry-all-errors https://download.geofabrik.de/index-v1.json -o index-v1.json || curl -4 -sSfL --connect-timeout 30 --retry 8 --retry-delay 30 --retry-all-errors https://download.geofabrik.de/index-v1.json -o index-v1.json
+          curl -sSfL --connect-timeout 30 --retry 6 --retry-delay 30 --retry-connrefused https://download.geofabrik.de/index-v1.json -o index-v1.json || curl -4 -sSfL --connect-timeout 30 --retry 6 --retry-delay 30 --retry-connrefused https://download.geofabrik.de/index-v1.json -o index-v1.json
           python scripts/regions.py regions.json > regions.txt
           wc -l regions.txt
 
       - name: Download and process each region
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          n=0; : > ok.txt; : > failed.txt
+          get() { curl -sSfL --connect-timeout 30 --retry 6 --retry-delay 30 --retry-connrefused "$1" -o region.osm.pbf || curl -4 -sSfL --connect-timeout 30 --retry 6 --retry-delay 30 --retry-connrefused "$1" -o region.osm.pbf; }
           while read -r id url; do
             echo "::group::$id"
-            curl -sSfL --connect-timeout 30 --retry 8 --retry-delay 30 --retry-all-errors "$url" -o region.osm.pbf || curl -4 -sSfL --connect-timeout 30 --retry 8 --retry-delay 30 --retry-all-errors "$url" -o region.osm.pbf
-            python scripts/build_tiles.py add region.osm.pbf work
+            if get "$url" && python scripts/build_tiles.py add region.osm.pbf work; then
+              echo "$n" >> ok.txt
+            else
+              echo "::warning::Skipped $id (download or processing failed: $url)"
+              echo "$id" >> failed.txt
+            fi
             rm -f region.osm.pbf
+            n=$((n+1))
             echo "::endgroup::"
           done < regions.txt
+          echo "OK: $(wc -l < ok.txt) of $n regions. Skipped: $(tr '\n' ' ' < failed.txt)"
+          # Publish only if nearly everything worked; a few missing regions just fall back to live OpenStreetMap in the app.
+          if [ "$(wc -l < failed.txt)" -gt $((n / 10)) ]; then echo "::error::Too many regions failed"; exit 1; fi
+          # Only claim coverage for regions that were actually built
+          python -c "import json; b=json.load(open('regions.json')); ok=[int(x) for x in open('ok.txt')]; json.dump([b[i] for i in ok], open('regions.json','w'))"
 
       - name: Write tiles
         run: |
