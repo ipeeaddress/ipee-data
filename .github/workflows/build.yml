@@ -14,55 +14,114 @@ concurrency:
   group: build
   cancel-in-progress: false
 
+env:
+  SHARDS: 8
+
 jobs:
-  build:
+  plan:
     runs-on: ubuntu-latest
-    timeout-minutes: 340
     steps:
       - uses: actions/checkout@v5
-
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-
-      - name: Install osmium
-        run: pip install osmium
-
       - name: List regions
         run: |
           curl -sSfL --connect-timeout 30 --retry 6 --retry-delay 30 --retry-connrefused https://download.geofabrik.de/index-v1.json -o index-v1.json || curl -4 -sSfL --connect-timeout 30 --retry 6 --retry-delay 30 --retry-connrefused https://download.geofabrik.de/index-v1.json -o index-v1.json
           python scripts/regions.py regions.json > regions.txt
           wc -l regions.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan
+          path: |
+            regions.txt
+            regions.json
 
-      - name: Download and process each region
+  # The regions are split across 8 machines that run at the same time.
+  shard:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install osmium
+        run: pip install osmium
+      - uses: actions/download-artifact@v4
+        with:
+          name: plan
+      - name: Download and process this machine's regions
         run: |
           set -uo pipefail
-          n=0; : > ok.txt; : > failed.txt
+          mkdir -p out/work; : > out/ok.txt; : > out/failed.txt
           get() { curl -sSfL --connect-timeout 30 --retry 6 --retry-delay 30 --retry-connrefused "$1" -o region.osm.pbf || curl -4 -sSfL --connect-timeout 30 --retry 6 --retry-delay 30 --retry-connrefused "$1" -o region.osm.pbf; }
+          n=0
           while read -r id url; do
-            echo "::group::$id"
-            if get "$url" && python scripts/build_tiles.py add region.osm.pbf work; then
-              echo "$n" >> ok.txt
-            else
-              echo "::warning::Skipped $id (download or processing failed: $url)"
-              echo "$id" >> failed.txt
+            if [ $((n % SHARDS)) -eq ${{ matrix.shard }} ]; then
+              echo "::group::$id"
+              if get "$url" && python scripts/build_tiles.py add region.osm.pbf out/work; then
+                echo "$n" >> out/ok.txt
+              else
+                echo "::warning::Skipped $id (download or processing failed: $url)"
+                echo "$id" >> out/failed.txt
+              fi
+              rm -f region.osm.pbf
+              echo "::endgroup::"
             fi
-            rm -f region.osm.pbf
             n=$((n+1))
-            echo "::endgroup::"
           done < regions.txt
-          echo "OK: $(wc -l < ok.txt) of $n regions. Skipped: $(tr '\n' ' ' < failed.txt)"
+          echo "Shard ${{ matrix.shard }}: built $(wc -l < out/ok.txt), skipped $(wc -l < out/failed.txt)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.shard }}
+          path: out
+          retention-days: 2
+
+  build:
+    needs: shard
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          path: art
+      - name: Merge the machines' results
+        run: |
+          set -euo pipefail
+          cp art/plan/regions.txt art/plan/regions.json .
+          total=$(wc -l < regions.txt)
+          mkdir -p work
+          for d in art/shard-*; do
+            [ -d "$d/work" ] || continue
+            (cd "$d/work" && find . -name '*.jsonl') | while read -r f; do
+              mkdir -p "work/$(dirname "$f")"
+              cat "$d/work/$f" >> "work/$f"
+            done
+          done
+          cat art/shard-*/ok.txt 2>/dev/null | sort -n > ok.txt || true
+          cat art/shard-*/failed.txt 2>/dev/null > failed.txt || true
+          ok=$(wc -l < ok.txt)
+          echo "OK: $ok of $total regions. Skipped: $(tr '\n' ' ' < failed.txt)"
+          # Regions on a machine that crashed are neither OK nor listed as skipped; count them as missing too.
           # Publish only if nearly everything worked; a few missing regions just fall back to live OpenStreetMap in the app.
-          if [ "$(wc -l < failed.txt)" -gt $((n / 10)) ]; then echo "::error::Too many regions failed"; exit 1; fi
+          if [ $((total - ok)) -gt $((total / 10)) ]; then echo "::error::Too many regions missing ($((total - ok)) of $total)"; exit 1; fi
           # Only claim coverage for regions that were actually built
           python -c "import json; b=json.load(open('regions.json')); ok=[int(x) for x in open('ok.txt')]; json.dump([b[i] for i in ok], open('regions.json','w'))"
-
       - name: Write tiles
         run: |
           python scripts/build_tiles.py finish work site regions.json
           cp README.md site/ 2>/dev/null || true
           du -sh site
-
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site

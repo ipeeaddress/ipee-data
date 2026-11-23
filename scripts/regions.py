@@ -52,6 +52,9 @@ for f in feats:
     p = f['properties']
     if 'pbf' not in p.get('urls', {}):
         continue
+    # Skip Geofabrik's multi-state bundles (us-midwest, us-south, ...): the states inside them are already picked.
+    if p['id'].startswith('us-') or p['id'] in ('us', 'canada', 'north-america'):
+        continue
     if p.get('parent') in PARENTS or any(c.startswith(ISO_PREFIXES) for c in iso2(p)):
         wanted_ids.append(p['id'])
 
