@@ -92,12 +92,14 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+      - name: Install osmium
+        run: pip install osmium
       - uses: actions/download-artifact@v4
         with:
           path: art
       - name: Merge the machines' results
         run: |
-          set -euo pipefail
+          set -uo pipefail
           cp art/plan/regions.txt art/plan/regions.json .
           total=$(wc -l < regions.txt)
           mkdir -p work
@@ -109,7 +111,26 @@ jobs:
             done
           done
           cat art/shard-*/ok.txt 2>/dev/null | sort -n > ok.txt || true
-          cat art/shard-*/failed.txt 2>/dev/null > failed.txt || true
+          # Second chance, from this (different) machine, for any region that didn't make it.
+          # One runner can get blocked by the download site while the others are fine.
+          get() { curl -sSfL --connect-timeout 30 --retry 6 --retry-delay 30 --retry-connrefused "$1" -o region.osm.pbf || curl -4 -sSfL --connect-timeout 30 --retry 6 --retry-delay 30 --retry-connrefused "$1" -o region.osm.pbf; }
+          : > failed.txt
+          n=0
+          while read -r id url; do
+            if ! grep -qx "$n" ok.txt; then
+              echo "::group::retry $id"
+              if get "$url" && python scripts/build_tiles.py add region.osm.pbf work; then
+                echo "$n" >> ok.txt
+              else
+                echo "::warning::Skipped $id (download or processing failed twice: $url)"
+                echo "$id" >> failed.txt
+              fi
+              rm -f region.osm.pbf
+              echo "::endgroup::"
+            fi
+            n=$((n+1))
+          done < regions.txt
+          sort -n -o ok.txt ok.txt
           ok=$(wc -l < ok.txt)
           echo "OK: $ok of $total regions. Skipped: $(tr '\n' ' ' < failed.txt)"
           # Regions on a machine that crashed are neither OK nor listed as skipped; count them as missing too.
